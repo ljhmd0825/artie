@@ -11,6 +11,21 @@ import requests
 from logger import LoggerSingleton as logger
 from deep_translator import GoogleTranslator
 
+_GT = GoogleTranslator(source="auto", target="ko")
+_MAX_CHARS = 4500  # 긴 텍스트 대비(필요 시 청크 분할에 사용)
+
+def _chunk_text(t: str, maxlen: int = _MAX_CHARS):
+    parts = re.split(r"(\n+|[.!?] )", t)
+    chunks, buf, cur = [], [], 0
+    for p in parts:
+        l = len(p)
+        if cur + l > maxlen and buf:
+            chunks.append("".join(buf)); buf, cur = [p], l
+        else:
+            buf.append(p); cur += l
+    if buf: chunks.append("".join(buf))
+    return chunks
+
 GAME_INFO_URL = "https://api.screenscraper.fr/api2/jeuInfos.php"
 USER_INFO_URL = "https://api.screenscraper.fr/api2/ssuserInfos.php"
 MAX_FILE_SIZE_BYTES = 104857600  # 100MB
@@ -257,44 +272,28 @@ def fetch_splash(game, config):
     return splash
 
 
-def fetch_synopsis(game, config, meta):
+def fetch_synopsis(game, config):
     synopsis = game["response"]["jeu"].get("synopsis", [])
-
     if not synopsis:
         return None
 
     synopsis_lang = config["synopsis"]["lang"]
     synopsis_text = next(
-        (item["text"] for item in synopsis if item["langue"] == synopsis_lang), None)
-
+        (item["text"] for item in synopsis if item.get("langue") == synopsis_lang),
+        None
+    )
     if not synopsis_text:
         return None
 
-    # 영어에서 한글로 번역
+    # 영어(또는 기타) → 한국어 번역만 수행
     try:
-        translated_text = GoogleTranslator(source='auto', target='ko').translate(synopsis_text)
+        src = html.unescape(synopsis_text)
+    except Exception:
+        src = synopsis_text
+
+    try:
+        return _GT.translate(src)  # 전역 번역기 사용
     except Exception as e:
         logger.log_error(f"Translation error: {e}")
-        translated_text = synopsis_text  # 번역 실패 시 원본 유지
-
-    if meta:
-        players = game["response"]["jeu"].get("joueurs", {"text": "unknown"})
-        rating = game["response"]["jeu"].get("note", {"text": "no rating"})
-        developer = game["response"]["jeu"].get("developpeur", {"text": "unknown developer"})
-
-        players_text = players.get("text", "알수없음")
-        rating_text = rating.get("text", "평점없음")
-        developer_text = developer.get("text", "알수없음")
-
-        try:
-            float_rating = float(rating_text)
-            rating_text = str(round(float_rating / 2, 1))
-        except ValueError:
-            pass  # 변환 실패 시 원본 유지
-
-        full_content = f"개발사:{developer_text}\n평점:{rating_text}\n플레이어수:{players_text}\n{translated_text}"
-    else:
-        full_content = translated_text
-
-    return html.unescape(full_content)
+        return src  # 실패 시 원문
 
