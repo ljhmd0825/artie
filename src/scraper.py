@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import html
 import json
 import os
 import re
@@ -8,12 +9,13 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 from logger import LoggerSingleton as logger
+from deep_translator import GoogleTranslator
 
 GAME_INFO_URL = "https://api.screenscraper.fr/api2/jeuInfos.php"
 USER_INFO_URL = "https://api.screenscraper.fr/api2/ssuserInfos.php"
 MAX_FILE_SIZE_BYTES = 104857600  # 100MB
 IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"]
-VALID_MEDIA_TYPES = {"box-2D", "box-3D", "mixrbv1", "mixrbv2", "ss"}
+VALID_MEDIA_TYPES = {"box-2D", "box-3D", "mixrbv1", "mixrbv2", "ss", "marquee", "wheel"}
 
 DEBUG = True
 
@@ -96,7 +98,7 @@ def parse_find_m3u_game_url(system_id, rom_path, dev_id, dev_password, username,
         "ssid": username,
         "sspassword": password,
         "systemeid": system_id,
-        # "romtype": "rom",
+        "romtype": "rom",
         "romnom": f"{clean_rom_name(rom_path)}.zip",
     }
     try:
@@ -243,6 +245,17 @@ def fetch_preview(game, config):
         return None
     return preview
 
+def fetch_splash(game, config):
+    medias = game["response"]["jeu"]["medias"]
+    regions = config.get("regions", ["us", "ame", "wor"])
+    splash = _fetch_media(medias, config["splash"], regions)
+    if not splash:
+        logger.log_error(
+            f"Error downloading splash: {game['response']['jeu']['medias']}"
+        )
+        return None
+    return splash
+
 
 def fetch_synopsis(game, config, meta):
     synopsis = game["response"]["jeu"].get("synopsis", [])
@@ -254,34 +267,34 @@ def fetch_synopsis(game, config, meta):
     synopsis_text = next(
         (item["text"] for item in synopsis if item["langue"] == synopsis_lang), None)
 
+    if not synopsis_text:
+        return None
+
+    # 영어에서 한글로 번역
+    try:
+        translated_text = GoogleTranslator(source='auto', target='ko').translate(synopsis_text)
+    except Exception as e:
+        logger.log_error(f"Translation error: {e}")
+        translated_text = synopsis_text  # 번역 실패 시 원본 유지
+
     if meta:
         players = game["response"]["jeu"].get("joueurs", {"text": "unknown"})
         rating = game["response"]["jeu"].get("note", {"text": "no rating"})
         developer = game["response"]["jeu"].get("developpeur", {"text": "unknown developer"})
-        classification = game["response"]["jeu"].get("classifications", [])
-        pegi_text = next(
-            (item["text"] for item in classification if item["type"] == "PEGI"), None)
-        esrb_text = next(
-            (item["text"] for item in classification if item["type"] == "ESRB"), None)
-        if pegi_text is not None:
-            classification_text = f", PEGI {pegi_text}"
-        elif esrb_text is not None:
-            classification_text = f", ESRB {esrb_text}"
-        else:
-            classification_text = f""
-        players_text = players.get("text", "unknown")
-        rating_text = rating.get("text", "no rating")
-        developer_text = developer.get("text", "unknown developer")
+
+        players_text = players.get("text", "알수없음")
+        rating_text = rating.get("text", "평점없음")
+        developer_text = developer.get("text", "알수없음")
 
         try:
             float_rating = float(rating_text)
             rating_text = str(round(float_rating / 2, 1))
         except ValueError:
-            pass  # Keep the original rating string if conversion fails
+            pass  # 변환 실패 시 원본 유지
 
-        full_content = f"{developer_text}, {rating_text}, {players_text}p{classification_text} - {synopsis_text}"
-
+        full_content = f"개발사:{developer_text}\n평점:{rating_text}\n플레이어수:{players_text}\n{translated_text}"
     else:
-        full_content = synopsis_text
+        full_content = translated_text
 
-    return full_content
+    return html.unescape(full_content)
+

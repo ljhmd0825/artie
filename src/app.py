@@ -5,7 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Callable
 
 import input
 from graphic import GUI
@@ -15,6 +15,7 @@ from scraper import (
     check_destination,
     fetch_box,
     fetch_preview,
+    fetch_splash,
     fetch_synopsis,
     get_game_data,
     get_image_files_without_extension,
@@ -22,7 +23,7 @@ from scraper import (
     get_user_data,
 )
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 selected_position = 0
 roms_selected_position = 0
@@ -50,13 +51,13 @@ class App:
         self.content = {}
         self.box_enabled = True
         self.preview_enabled = True
+        self.splash_enabled = True
         self.synopsis_enabled = True
         self.meta_enabled = True
         self.threads = 1
         self.username = ""
         self.password = ""
         self.gui = GUI()
-        self.sub_dirs = False
 
     def update_systems_mapping(self):
         self.systems_mapping = {}
@@ -105,12 +106,14 @@ class App:
         self.password = self.config.get("screenscraper").get("password")
         self.threads = self.config.get("screenscraper").get("threads")
         self.content = self.config.get("screenscraper").get("content")
+        self.show_scraped_roms = self.config.get("screenscraper").get(
+            "show_scraped_roms"
+        )
         self.box_enabled = self.content["box"]["enabled"]
         self.preview_enabled = self.content["preview"]["enabled"]
+        self.splash_enabled = self.content["splash"]["enabled"]
         self.synopsis_enabled = self.content["synopsis"]["enabled"]
         self.meta_enabled = self.content["synopsis"]["meta"]
-
-        self.sub_dirs = self.config.get("sub_dirs")
         self.get_user_threads()
 
         self.update_systems_mapping()
@@ -170,10 +173,7 @@ class App:
         system_path = Path(self.roms_path) / system
 
         for root, dirs, files in os.walk(system_path):
-            if self.sub_dirs:
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-            else:
-                dirs[:] = []
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
 
             for file in files:
                 file_path = Path(root) / file
@@ -186,26 +186,39 @@ class App:
                     roms.append(rom)
         return roms
 
-    def delete_files_in_directory(self, filenames, directory_path):
+    def delete_files_in_directory(
+        self, filenames: List[str], directory_path: str
+    ) -> None:
         directory = Path(directory_path)
         if directory.is_dir():
+            filenames_set = set(filenames)
             for file in directory.iterdir():
-                if file.is_file() and file.stem in filenames:
+                if file.is_file() and file.stem in filenames_set:
                     file.unlink()
 
+    def get_enabled_media_types(self) -> List[str]:
+        return [
+            media
+            for media, enabled in [
+                ("box", self.box_enabled),
+                ("preview", self.preview_enabled),
+                ("splash", self.splash_enabled),
+                ("synopsis", self.synopsis_enabled),
+            ]
+            if enabled
+        ]
+
+    def delete_rom_media(self, rom: Rom, selected_system: str) -> None:
+        system = self.systems_mapping.get(selected_system)
+        if system:
+            for media_type in self.get_enabled_media_types():
+                self.delete_files_in_directory([rom.name], system.get(media_type, ""))
+
     def delete_system_media(self) -> None:
-        global selected_system
         system = self.systems_mapping.get(selected_system)
         if system:
             roms = [rom.name for rom in self.get_roms(selected_system)]
-            media_types = []
-            if self.box_enabled:
-                media_types.append("box")
-            if self.preview_enabled:
-                media_types.append("preview")
-            if self.synopsis_enabled:
-                media_types.append("synopsis")
-            for media_type in media_types:
+            for media_type in self.get_enabled_media_types():
                 self.delete_files_in_directory(roms, system.get(media_type, ""))
 
     def draw_available_systems(self, available_systems: List[str]) -> None:
@@ -254,11 +267,10 @@ class App:
             elif input.key_pressed("X"):
                 selected_system = available_systems[selected_position]
                 self.delete_system_media()
-                self.gui.draw_log(f"Deleting all existing {selected_system} media...")
+                self.gui.draw_log(f"Deleting all enabled {selected_system} media...")
                 self.gui.draw_paint()
                 skip_input_check = True
                 time.sleep(self.LOG_WAIT)
-                return
             elif input.key_pressed("L1"):
                 if selected_position > 0:
                     selected_position = max(0, selected_position - max_elem)
@@ -319,11 +331,13 @@ class App:
         if not user_info:
             self.threads = 1
         else:
-            self.threads = min(self.threads, int(user_info["response"]["ssuser"]["maxthreads"]))
+            self.threads = min(
+                self.threads, int(user_info["response"]["ssuser"]["maxthreads"])
+            )
         logger.log_info(f"number of threads: {self.threads}")
 
     def scrape(self, rom, system_id):
-        scraped_box = scraped_preview = scraped_synopsis = None
+        scraped_box = scraped_preview = scraped_splash = scraped_synopsis = None
         try:
             game = get_game_data(
                 system_id,
@@ -340,25 +354,44 @@ class App:
                     scraped_box = fetch_box(game, content)
                 if self.preview_enabled:
                     scraped_preview = fetch_preview(game, content)
+                if self.splash_enabled:
+                    scraped_splash = fetch_splash(game, content)
                 if self.synopsis_enabled:
                     scraped_synopsis = fetch_synopsis(game, content, self.meta_enabled)
         except Exception as e:
             logger.log_error(f"Error scraping {rom.name}: {e}")
 
-        return scraped_box, scraped_preview, scraped_synopsis
+        return scraped_box, scraped_preview, scraped_splash, scraped_synopsis
 
-    def process_rom(self, rom, system_id, box_dir, preview_dir, synopsis_dir):
-        scraped_box, scraped_preview, scraped_synopsis = self.scrape(rom, system_id)
+    def process_rom(self, rom, system_id, box_dir, preview_dir, splash_dir, synopsis_dir):
+        scraped_box, scraped_preview, scraped_splash, scraped_synopsis = self.scrape(rom, system_id)
         if scraped_box:
             destination: Path = box_dir / f"{rom.name}.png"
             self.save_file_to_disk(scraped_box, destination)
         if scraped_preview:
             destination: Path = preview_dir / f"{rom.name}.png"
             self.save_file_to_disk(scraped_preview, destination)
+        if scraped_splash:
+            destination: Path = splash_dir / f"{rom.name}.png"
+            self.save_file_to_disk(scraped_splash, destination)
         if scraped_synopsis:
             destination: Path = synopsis_dir / f"{rom.name}.txt"
             self.save_file_to_disk(scraped_synopsis.encode("utf-8"), destination)
-        return scraped_box, scraped_preview, scraped_synopsis, rom.name
+        return scraped_box, scraped_preview, scraped_splash, scraped_synopsis, rom.name
+    def get_roms_without_files(
+        self,
+        enabled: bool,
+        dir_path: Path,
+        roms_list: List[Rom],
+        get_files_func: Callable[[Path], List[str]],
+    ) -> List[Rom]:
+        if enabled:
+            if not dir_path.exists():
+                dir_path.mkdir(parents=True, exist_ok=True)
+                return roms_list
+            files = get_files_func(dir_path)
+            return [rom for rom in roms_list if rom.name not in files]
+        return []
 
     def load_roms(self) -> None:
         global selected_position, current_window, roms_selected_position, skip_input_check, selected_system
@@ -382,44 +415,40 @@ class App:
 
         box_dir = Path(system["box"])
         preview_dir = Path(system["preview"])
+        splash_dir = Path(system["splash"])
         synopsis_dir = Path(system["synopsis"])
         system_id = system["id"]
 
-        if self.box_enabled and not box_dir.exists():
-            box_dir.mkdir(parents=True, exist_ok=True)
-            roms_without_box: List[Rom] = roms_list
-        elif self.box_enabled:
-            box_files = get_image_files_without_extension(box_dir)
-            roms_without_box = [rom for rom in roms_list if rom.name not in box_files]
-        else:
-            roms_without_box = []
-
-        if self.preview_enabled and not preview_dir.exists():
-            preview_dir.mkdir(parents=True, exist_ok=True)
-            roms_without_preview: List[Rom] = roms_list
-        elif self.preview_enabled:
-            preview_files = get_image_files_without_extension(preview_dir)
-            roms_without_preview = [
-                rom for rom in roms_list if rom.name not in preview_files
-            ]
-        else:
-            roms_without_preview = []
-
-        if self.synopsis_enabled and not synopsis_dir.exists():
-            synopsis_dir.mkdir(parents=True, exist_ok=True)
-            roms_without_synopsis: List[Rom] = roms_list
-        elif self.synopsis_enabled:
-            synopsis_files = get_txt_files_without_extension(synopsis_dir)
-            roms_without_synopsis = [
-                rom for rom in roms_list if rom.name not in synopsis_files
-            ]
-        else:
-            roms_without_synopsis = []
-
-        roms_to_scrape = sorted(
-            list(set(roms_without_box + roms_without_preview + roms_without_synopsis)),
-            key=lambda rom: rom.name,
+        roms_without_box = self.get_roms_without_files(
+            self.box_enabled, box_dir, roms_list, get_image_files_without_extension
         )
+        roms_without_preview = self.get_roms_without_files(
+            self.preview_enabled,
+            preview_dir,
+            roms_list,
+            get_image_files_without_extension,
+        )
+        roms_without_splash = self.get_roms_without_files(
+            self.splash_enabled,
+            splash_dir,
+            roms_list,
+            get_image_files_without_extension,
+        )
+        roms_without_synopsis = self.get_roms_without_files(
+            self.synopsis_enabled,
+            synopsis_dir,
+            roms_list,
+            get_txt_files_without_extension,
+        )
+        if self.show_scraped_roms:
+            roms_to_scrape = roms_list
+        else:
+            roms_to_scrape = sorted(
+                list(
+                    set(roms_without_box + roms_without_preview + roms_without_splash + roms_without_synopsis)
+                ),
+                key=lambda rom: rom.name,
+            )
 
         if len(roms_to_scrape) < 1:
             current_window = "emulators"
@@ -436,11 +465,11 @@ class App:
             self.gui.draw_log("Scraping...")
             self.gui.draw_paint()
             rom = roms_to_scrape[roms_selected_position]
-            scraped_box, scraped_preview, scraped_synopsis, _ = self.process_rom(
-                rom, system_id, box_dir, preview_dir, synopsis_dir
+            scraped_box, scraped_preview, scraped_splash, scraped_synopsis, _ = self.process_rom(
+                rom, system_id, box_dir, preview_dir, splash_dir, synopsis_dir
             )
 
-            if not scraped_box and not scraped_preview and not scraped_synopsis:
+            if not scraped_box and not scraped_preview and not scraped_splash and not scraped_synopsis:
                 self.gui.draw_log("Scraping failed!")
                 logger.log_error(f"Failed to get screenshot for {rom.name}")
             else:
@@ -448,6 +477,13 @@ class App:
             self.gui.draw_paint()
             time.sleep(self.LOG_WAIT)
             exit_menu = True
+        elif input.key_pressed("X"):
+            rom = roms_to_scrape[roms_selected_position]
+            self.delete_rom_media(rom, selected_system)
+            self.gui.draw_log(f"Deleting all enabled {rom.name} media...")
+            self.gui.draw_paint()
+            skip_input_check = True
+            time.sleep(self.LOG_WAIT)
         elif input.key_pressed("START"):
             progress: int = 0
             success: int = 0
@@ -463,15 +499,16 @@ class App:
                         system_id,
                         box_dir,
                         preview_dir,
+                        splash_dir,
                         synopsis_dir,
                     ): rom
                     for rom in roms_to_scrape
                 }
                 for future in concurrent.futures.as_completed(futures):
-                    scraped_box, scraped_preview, scraped_synopsis, rom_name = (
+                    scraped_box, scraped_preview, scraped_splash, scraped_synopsis, rom_name = (
                         future.result()
                     )
-                    if scraped_box or scraped_preview or scraped_synopsis:
+                    if scraped_box or scraped_preview or scraped_splash or scraped_synopsis:
                         success += 1
                     else:
                         logger.log_error(f"Failed to get screenshot for {rom_name}")
@@ -528,13 +565,15 @@ class App:
             missing_parts.append(f"No box: {len(roms_without_box)}")
         if self.preview_enabled:
             missing_parts.append(f"No preview: {len(roms_without_preview)}")
+        if self.splash_enabled:
+            missing_parts.append(f"No splash: {len(roms_without_splash)}")
         if self.synopsis_enabled:
             missing_parts.append(f"No text: {len(roms_without_synopsis)}")
 
         missing_text = " / ".join(missing_parts)
 
-        self.gui.draw_text((90, 10), rom_text, anchor="mm")
-        self.gui.draw_text((500, 10), missing_text, anchor="mm")
+        self.gui.draw_text((10, 10), rom_text, anchor="lm")
+        self.gui.draw_text((10, 30), missing_text, anchor="lm")
 
         start_idx = int(roms_selected_position / max_elem) * max_elem
         end_idx = start_idx + max_elem
@@ -546,6 +585,10 @@ class App:
                     (
                         "Preview",
                         self.preview_enabled and rom not in roms_without_preview,
+                    ),
+                    (
+                        "Splash",
+                        self.splash_enabled and rom not in roms_without_splash,
                     ),
                     (
                         "Text",
@@ -573,15 +616,15 @@ class App:
             if already_scraped_text:
                 self.row_list(
                     already_scraped_text,
-                    (500, 50 + (i * 35)),
+                    (400, 50 + (i * 35)),
                     50,
                     i == (roms_selected_position % max_elem),
                 )
         self.button_rectangle((30, 450), "Start", "All")
-        self.button_circle((170, 450), "A", "Download")
-        self.button_circle((300, 450), "B", "Back")
-        self.button_circle((480, 450), "M", "Exit")
-
+        self.button_circle((140, 450), "A", "Download")
+        self.button_circle((250, 450), "X", "Delete")
+        self.button_circle((370, 450), "B", "Back")
+        self.button_circle((500, 450), "M", "Exit")
         self.gui.draw_paint()
 
     def row_list(

@@ -1,7 +1,11 @@
 #!/bin/sh
+# HELP: Artie Scraper
+# ICON: artie
+# GRID: Artie Scraper
+
 echo app >/tmp/act_go
 
-ARTIE_DIR="/mnt/mmc/MUOS/application/Artie/.artie"
+ARTIE_DIR="/mnt/mmc/MUOS/application/Artie Scraper/.artie"
 
 cd "$ARTIE_DIR" || exit
 
